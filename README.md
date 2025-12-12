@@ -18,6 +18,10 @@ Projeto completo em Python demonstrando **Streamable HTTP + SSE** para MCP, com:
 
 O objetivo é ter o **HTTP inteiro**, do protocolo mostrando cada passo do protocolo MCP.
 
+Para maiores detalhes sobre MCP consulte a documentação oficial em:
+
+https://modelcontextprotocol.io/specification/2025-11-25
+
 ---
 
 ## 0. Requisitos
