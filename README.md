@@ -101,14 +101,239 @@ O cliente imprime tudo no terminal: requests, respostas, status HTTP e mensagens
 
 Antes de ver os detalhes dos workflows, é importante entender como o MCP Streamable HTTP funciona, e como ele usa HTTP, JSON-RPC e SSE.
 
-Vamos entender os conceitos básicos de conexão TCP/IP e o modelo OSI, bem como o conseito de cliente-servidor e como os protocolos de aplicação funciona (a camada 7 do modelo OSI).
+Vamos entender os conceitos básicos de conexão TCP/IP e o modelo OSI, bem como o conceito de cliente-servidor e como os protocolos de aplicação funcionam (que logo mais veremos que reside na camada 7 do modelo OSI).
 
 ### 4.1 Camadas de rede: OSI, TCP/IP e onde o HTTP entra
 
-Quando a gente fala de conexão, na prática estamos lidando com camadas de abstração. O modelo OSI tem 7 camadas (do físico até a aplicação).
+Quando a gente fala de conexão, na prática estamos lidando com camadas de abstração.
 
-etc... [ TODO: criar essa seção]
+Não precisa decorar o modelo OSI, mas ter a imagem na cabeça ajuda:
 
+* Camadas mais baixas (físico, enlace, rede)
+→ cabo, wi-fi, IP, roteador, etc. Como desenvolvedores não vamos mexer aqui.
+
+* Camada de transporte (TCP)
+→ garante que os bytes chegam na ordem.
+
+* Camada de aplicação (HTTP, WebSocket, etc.)
+→ define o “protocolo de conversa” entre cliente e servidor.
+
+Um jeito bem simplificado de pensar:
+
+TCP é um cano contínuo de bytes entre cliente e servidor e HTTP é uma convenção em cima desse cano que vai combinar o jogo sobre como os bytes são organizados em mensagens tais como padrões sobre o começo da requisição (POST /mcp HTTP/1.1) headers (Content-Type, Accept, etc.) corpo (que pode ser JSON, HTML, SSE, o que a gente quiser).
+
+Em cima de HTTP, a gente ainda pode ter outro protocolo, como JSON-RPC que define o formato de mensagens (method, params, result, error) e se aplica mais especificamente no corpo, matendo headers e outros detalhes já definidos no HTTP.
+
+O MCP define quais métodos existem (initialize, tools/call, etc.) e o que eles significam, visto que o JSON-RPC é só um formato genérico sem combinar significados específicos.
+
+Então o modelo mental que temos é:
+
+```
+MCP        → "quais métodos existem" (initialize, tools/call, resources/read…)
+JSON-RPC   → "como é o formato das mensagens" (jsonrpc, id, method, result…)
+HTTP       → "como cliente e servidor trocam requisições e respostas"
+TCP        → "canduíte confiável de bytes"
+```
+
+### 4.2 Modelo cliente-servidor e HTTP "normal"
+
+No modelo clássico cliente-servidor, o cliente abre uma conexão TCP com o servidor e em cima dessa conexão, ele manda uma requisição HTTP, com um formato mais ou menos assim:
+
+uma linha de início:
+POST /mcp HTTP/1.1
+
+alguns headers:
+Host, Content-Type, Accept, Mcp-Session-Id, etc.
+
+um corpo (body), que no nosso caso é JSON com JSON-RPC dentro.
+
+Exemplo (modo não-streaming):
+
+```
+POST /mcp HTTP/1.1
+Host: exemplo.com
+Content-Type: application/json
+Accept: application/json, text/event-stream
+
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{...}}
+```
+
+O servidor então lê isso tudo e processa a lógica e devolve uma resposta HTTP, que tem o formato:
+
+```
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{"jsonrpc":"2.0","id":1,"result":{...}}
+```
+
+Existem algumas regras simples no HTTP "normal":
+
+1 requisição → 1 resposta.
+
+E a resposta tem:
+
+a) status (200 OK, 404, etc.)
+
+b) headers
+
+c) e um corpo (que pode ser JSON, HTML, etc.).
+
+Depois que o corpo terminou, acabou essa resposta e isso é o "modo simples" ou "normal" do HTTP: requisição, resposta, fim.
+
+### 4.3 Onde entra o JSON-RPC nessa história
+
+O corpo da requisição/resposta HTTP, pra gente, é sempre um JSON com o formato do JSON-RPC. P.ex.:
+
+Requisição:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "tools/call",
+  "params": {
+    "name": "get_weather",
+    "arguments": {
+      "location": "São Paulo"
+    }
+  }
+}
+```
+
+Resposta:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "result": {
+    "content": [
+      { "type": "text", "text": "Current weather in São Paulo: ..." }
+    ],
+    "isError": false
+  }
+}
+```
+Ideia geral aqui é:
+
+- O HTTP define: "tem um corpo aqui".
+- O JSON define: "esse corpo segue o padrão JavaScript Object Notation".
+- O JSON-RPC define: "esse corpo é json com uma mensagem com método X, parâmetros Y, id Z".
+
+O MCP então pega o JSON-RPC e diz:
+
+method = "initialize" → significa “vamos negociar versão, capabilities, etc.”
+
+method = "tools/list" → significa “me diga quais ferramentas você expõe”.
+
+method = "tools/call" → significa “chama essa tool com esses argumentos”.
+
+etc.
+
+Ou seja: HTTP é a estrutura, JSON é o formato, JSON-RPC é a linguagem, MCP é o vocabulário. Não é a melhor analogia do mundo, mas ajuda a entender hahaha.
+
+### 4.4 Onde entra SSE: HTTP em "modo streaming"
+
+Agora vem o SSE (Server-Sent Events). Em linguagem simples, SSE é um padrão HTTP que permite ao servidor enviar múltiplos eventos para o cliente em uma única conexão HTTP aberta.
+
+Sem SSE (modo normal), o fluxo é:
+
+Requisição:
+
+```
+POST /mcp HTTP/1.1
+Host: exemplo.com
+Content-Type: application/json
+Accept: application/json, text/event-stream
+
+{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{...}}
+```
+
+Resposta:
+
+```
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{"jsonrpc":"2.0","id":4,"result":{...}}
+```
+
+Com SSE (modo streaming), o fluxo é:
+Requisição:
+
+```
+POST /mcp HTTP/1.1
+Host: exemplo.com
+Content-Type: application/json
+Accept: application/json, text/event-stream
+{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{...}}
+```
+
+Resposta:
+
+```
+HTTP/1.1 200 OK
+Content-Type: text/event-stream
+Cache-Control: no-cache
+Connection: keep-alive
+
+data: { "jsonrpc": "2.0", "method": "notifications/log", ... }
+
+data: { "jsonrpc": "2.0", "id": 4, "result": { ... } }
+```
+
+
+Detalhes importantes:
+
+O cabeçalho HTTP (HTTP 200, Content-Type, etc.) vem uma vez só, no começo. Já o corpo é um texto contínuo onde cada evento vem em uma ou mais linhas começando com data: ...
+
+Uma linha em branco separa um evento do próximo e a conexão fica aberta permintindo o servidor enviar um data: ... agora, depois de 1s envia outro data: ..., depois de 5s outro… etc...O cliente pode ficar lendo isso como se fosse um chat.
+
+O SSE, portanto, não é outro protocolo de rede, é só um jeito de usar HTTP para mandar múltiplas mensagens em sequência. É um jeito padronizado de escrever texto dentro de uma resposta HTTP. O conteúdo do data é totalmente livre, pode ser data: "olá", data: {meu JSON}, um CSV, tanto faz.
+
+### 4.5 Como o MCP usa HTTP + JSON-RPC + SSE (Streamable HTTP)
+
+Agora com as peças isoladas já esclarecidas, dá pra ver o MCP Streamable HTTP como uma combinação de tudo isso:
+
+* TCP: conexão confiável de bytes.
+
+* HTTP: cliente faz POST /mcp e opcionalmente GET /mcp.
+
+* Servidor: responde com application/json ou text/event-stream.
+
+* SSE: (só quando é streaming)
+
+* Se o servidor escolher Content-Type: text/event-stream, começa a mandar:
+```
+  data: { ...json-rpc... }
+  linha em branco
+  data: { ...json-rpc... }
+  linha em branco
+  e assim por diante.
+```
+* JSON-RPC: cada data: ... carrega um objeto JSON-RPC completo e existe um campo id que liga request ↔ response equanto que o method identifica notificações, elicitation, etc.
+
+* MCP: define quais métodos existem e como usar: initialize, tools/list, tools/call, resources/read, elicitation/create, notifications/... etc. O MCP também define o comportamento do transporte.
+* Streamable HTTP: sempre POST /mcp com JSON. O server pode responder com JSON único (não streaming), ou abrir um stream SSE com 1 ou vários JSON-RPC (data: ...).
+
+### 4.6 O que mudou do MCP antigo para o MCP Streamable HTTP
+
+O MCP original usava SSE como transporte primário, com GET /sse para abrir o stream e POST /messages para mandar requests.
+
+No modelo antigo funcionava assim:
+
+GET /sse abre o stream, POST /messages manda requests, e as respostas chegavam só pelo /sse.
+
+Agora, com Streamable HTTP funciona assim:
+
+POST /mcp já é suficiente pra mandar o request e receber a resposta. que pode ser um JSON único, ou um stream SSE (data: ... data: ...), no mesmo endpoint.
+
+Ou seja:
+
+O que foi deprecado foi o transporte antigo (GET /sse + POST /messages). O SSE em si continua normal, mas agora como "modo streaming de resposta do /mcp" e não mais como transporte separado.
+
+Com isso em mente, quando você olhar o código do server.py e do client.py, fica bem mais fácil enxergar quando é HTTP normal e quando é SSE e quando é JSON-RPC e como o MCP junta tudo isso num fluxo só.
 
 ---
 
